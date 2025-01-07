@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
+
+
+data = "fed-funds-rate-historical-chart.csv"
+df = pd.read_csv(data, skiprows=16, names=['date', 'value'])  # Skip first 16 rows because there's no data
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+all_dates = pd.date_range(start="1954-07-01", end="2024-11-01")
+complete_df = pd.DataFrame({'date': all_dates})
+merged_df = pd.merge(complete_df, df, on='date', how='left')
+
+window_size = 7
+merged_df['SMA_filled'] = merged_df['value'].fillna(merged_df['value'].rolling(window=window_size, min_periods=1).mean())
+merged_df = merged_df[['date', 'SMA_filled']]
+merged_df.set_index('date', inplace=True)
+rates = merged_df['SMA_filled']
+
+scaler = StandardScaler()
+rates = pd.Series(scaler.fit_transform(rates.values.reshape(-1, 1)).flatten(), index=rates.index)
+
+# CIR
+def cir_log_likelihood(params, rates, dt):
+    kappa, theta, sigma = params
+    n = len(rates)
+    if kappa <= 0 or sigma <= 0:
+        return np.inf  # Penalize invalid parameters
+    log_likelihood = 0
+    for i in range(1, n):
+        mu = rates[i - 1] + kappa * (theta - rates[i - 1]) * dt
+        variance = sigma**2 * rates[i - 1] * dt
+        if variance <= 0:
+            return np.inf  # Penalize invalid variance
+        likelihood = -0.5 * np.log(2 * np.pi * variance) - 0.5 * ((rates[i] - mu)**2 / variance)
+        log_likelihood += likelihood
+    return -log_likelihood
+
+def simulate_cir(r0, kappa, theta, sigma, n, dt):
+    rates = [r0]
+    for _ in range(1, n):
+        dr = kappa * (theta - rates[-1]) * dt + sigma * np.sqrt(max(rates[-1], 0) * dt) * np.random.normal()
+        new_rate = rates[-1] + dr
+        new_rate = max(new_rate, 0)
+        rates.append(new_rate)
+    return np.array(rates)
+
+# Cross-Validation
+def time_series_cross_validation(data, n_splits, initial_params, dt):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    mse_scores = []
+    mae_scores = []
+    r2_scores = []
+
+    split_idx = 1
+    for train_index, test_index in tscv.split(data):
+        print(f"Cross-Validation Fold {split_idx}")
+        split_idx += 1
+        
+        train_data, test_data = data.iloc[train_index], data.iloc[test_index]
+        
+        train_data = train_data.reset_index(drop=True)
+        test_data = test_data.reset_index(drop=True)
+        
+        result = minimize(
+            cir_log_likelihood, 
+            initial_params, 
+            args=(train_data, dt), 
+            bounds=[(1e-6, None), (1e-6, 1), (1e-6, None)]
+        )
+        kappa, theta, sigma = result.x
+        print(f"Calibrated parameters: Kappa: {kappa}, Theta: {theta}, Sigma: {sigma}")
+
+        train_simulated = simulate_cir(train_data[0], kappa, theta, sigma, len(train_data), dt)
+        test_simulated = simulate_cir(test_data[0], kappa, theta, sigma, len(test_data), dt)
+
+        train_simulated = np.nan_to_num(train_simulated, nan=0)
+        test_simulated = np.nan_to_num(test_simulated, nan=0)
+
+        # Evaluate metrics on testing data
+        test_mse = mean_squared_error(test_data, test_simulated)
+        test_mae = mean_absolute_error(test_data, test_simulated)
+        test_r2 = r2_score(test_data, test_simulated)
+        
+        # Append metrics
+        mse_scores.append(test_mse)
+        mae_scores.append(test_mae)
+        r2_scores.append(test_r2)
+        
+        print(f"Fold Metrics: MSE: {test_mse}, MAE: {test_mae}, R^2: {test_r2}\n")
+
+    return mse_scores, mae_scores, r2_scores
+
+initial_params = [0.1, 0.5, 0.02]
+dt = 1 / 252  # Daily time step
+result = minimize(cir_log_likelihood, initial_params, args=(rates, dt), bounds=[(1e-6, None), (1e-6, 1), (1e-6, None)])
+kappa, theta, sigma = result.x
+print(f"Overall Calibrated Parameters:\nKappa: {kappa}\nTheta: {theta}\nSigma: {sigma}")
+
+n_splits = 5
+mse_scores, mae_scores, r2_scores = time_series_cross_validation(rates, n_splits, initial_params, dt)
+
+# Print metrics
+print("\nCross-Validation Results:")
+print(f"Average MSE: {np.mean(mse_scores):.4f} ± {np.std(mse_scores):.4f}")
+print(f"Average MAE: {np.mean(mae_scores):.4f} ± {np.std(mae_scores):.4f}")
+print(f"Average R^2: {np.mean(r2_scores):.4f} ± {np.std(r2_scores):.4f}")
+
+# Plot the last cross-validation fold's actual vs simulated rates
+
+test_data = rates.iloc[len(rates) * (n_splits - 1) // n_splits:]
+test_simulated = simulate_cir(test_data.iloc[0], kappa, theta, sigma, len(test_data), dt)
+
+plt.figure(figsize=(12, 6))
+plt.plot(test_data.index, test_data, label="Actual Rates", color="blue", linewidth=2)
+plt.plot(test_data.index, test_simulated, label="Predicted Rates", color="red", linestyle="--", linewidth=2)
+plt.xlabel("Date")
+plt.ylabel("Interest Rate")
+plt.title("Actual vs Predicted Interest Rates on Testing Data (Final CV Fold)")
+plt.legend(loc="best")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()

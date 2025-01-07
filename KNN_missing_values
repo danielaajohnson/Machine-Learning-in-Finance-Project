@@ -1,0 +1,55 @@
+import pandas as pd
+import numpy as np
+from sklearn.impute import KNNImputer
+
+data = "fed-funds-rate-historical-chart.csv"
+df = pd.read_csv(data, skiprows=16, names=['date', 'value'])
+
+df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+# Check Missing values and dates:
+
+#missing_values = df[df['value'].isnull()]
+#print(f"Number of missing values: {missing_values.shape[0]}")
+
+#if not missing_values.empty:
+#    print("Rows with missing values:")
+#    print(missing_values)
+
+#expected_dates = pd.date_range(start="1954-07-01", end="2024-11-22")
+#missing_dates = expected_dates.difference(df['date'])
+#print(f"Number of missing dates in the dataset: {len(missing_dates)}")
+
+#if len(missing_dates) > 0:
+#    print("Missing dates:")
+#    print(missing_dates)
+
+df = df.dropna(subset=['value'])
+
+all_dates = pd.date_range(start="1954-07-01", end="2024-11-01")
+complete_df = pd.DataFrame({'date': all_dates})
+
+merged_df = pd.merge(complete_df, df, on='date', how='left')
+
+merged_df['day_of_week'] = merged_df['date'].dt.dayofweek
+merged_df['month'] = merged_df['date'].dt.month
+merged_df['year'] = merged_df['date'].dt.year
+
+imputer=KNNImputer(n_neighbors=4)
+merged_df[['value', 'day_of_week', 'month', 'year']] = imputer.fit_transform(merged_df[['value', 'day_of_week', 'month', 'year']])
+
+dates_around_2017 = merged_df[(merged_df['date'] >= '2017-11-20') & (merged_df['date'] <= '2017-11-26')]
+
+print("Dates around 2017-11-23:")
+print(dates_around_2017)
+
+
+dates_around_2018 = merged_df[(merged_df['date'] >= '2017-12-28') & (merged_df['date'] <= '2018-01-05')]
+
+print("Dates around 2018-01-01:")
+print(dates_around_2018)
+
+dates_around_christmas = merged_df[(merged_df['date'] >= '2017-12-22') & (merged_df['date'] <= '2017-12-28')]
+
+print("Dates around 2017-12-25")
+print(dates_around_christmas)
